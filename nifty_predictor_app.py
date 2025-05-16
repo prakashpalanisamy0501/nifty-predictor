@@ -11,8 +11,12 @@ from sklearn.ensemble import RandomForestClassifier
 st.title("📈 NIFTY Index Movement Predictor (AI-based)")
 st.markdown("This model predicts whether NIFTY will go **UP or DOWN** in the next 5 minutes using technical indicators.")
 
-# --- Fetch data safely ---
-@st.cache_data
+# --- Manual Refresh Button ---
+if st.button("🔄 Refresh Data Now"):
+    st.cache_data.clear()  # Clear cache to reload fresh data
+
+# --- Cached Data Loader (auto-refresh every 2 minutes) ---
+@st.cache_data(ttl=120)  # Refresh cache every 120 seconds (2 minutes)
 def load_data():
     try:
         data = yf.download("^NSEI", interval="5m", period="5d", progress=False)
@@ -27,7 +31,7 @@ def load_data():
         st.error(f"Error downloading data: {e}")
         return pd.DataFrame()
 
-# Load data
+# --- Load Data ---
 nifty = load_data()
 
 if not nifty.empty:
