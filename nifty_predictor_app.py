@@ -20,7 +20,7 @@ if st.button("🔄 Refresh Data Now"):
 @st.cache_data(ttl=120)
 def load_data():
     try:
-        data = yf.download("^NSEI", interval="2m", period="2d", progress=False)
+        data = yf.download("^NSEI", interval="2m", period="7d", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
