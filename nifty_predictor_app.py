@@ -9,133 +9,104 @@ from sklearn.ensemble import RandomForestClassifier
 import pytz
 
 # Title
-st.title("📈 NIFTY Index Movement Predictor (AI-based)")
-st.markdown("This model predicts whether NIFTY will go **UP or DOWN** in the next 5 minutes and next **1 hour** (in 5-minute intervals) using technical indicators.")
+st.title("📈 NIFTY Quick Profit Predictor (AI-based)")
+st.markdown("Predicts whether NIFTY will go **UP or DOWN** in the next few minutes or 1 hour using technical indicators. Ideal for ₹1000 profit scalping.")
+
+# Timeframe selection
+timeframe = st.selectbox("⏱ Select Timeframe for Trading", ['2m', '5m', '15m'])
 
 # Manual Refresh Button
 if st.button("🔄 Refresh Data Now"):
     st.cache_data.clear()
 
-# Load Data Function with IST timezone and 2-minute cache
+# Load Data
 @st.cache_data(ttl=120)
-def load_data():
+def load_data(interval):
     try:
-        data = yf.download("^NSEI", interval="5m", period="5d", progress=False)
+        data = yf.download("^NSEI", interval=interval, period="5d", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         data = data.dropna()
         data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
         data = data.dropna(subset=['Close'])
-
-        # Convert index to IST
         if data.index.tzinfo is None or data.index.tz is None:
             data.index = data.index.tz_localize('UTC')
         data.index = data.index.tz_convert('Asia/Kolkata')
-
         return data
     except Exception as e:
         st.error(f"Error downloading data: {e}")
         return pd.DataFrame()
 
-# Load Data
-nifty = load_data()
+nifty = load_data(timeframe)
 
 if not nifty.empty:
-    # Show recent data
-    st.subheader("📊 Latest NIFTY Data (5-min)")
+    st.subheader("📊 Latest NIFTY Data")
     st.dataframe(nifty.tail(3))
 
     try:
         # Feature Engineering
-        nifty['RSI'] = RSIIndicator(close=nifty['Close'], window=14).rsi()
-        macd = MACD(close=nifty['Close'])
+        nifty['RSI'] = RSIIndicator(close=nifty['Close'], window=10).rsi()
+        macd = MACD(close=nifty['Close'], window_slow=26, window_fast=12, window_sign=9)
         nifty['MACD'] = macd.macd()
         nifty['Signal'] = macd.macd_signal()
-        boll = BollingerBands(close=nifty['Close'])
+        boll = BollingerBands(close=nifty['Close'], window=20, window_dev=2)
         nifty['BB_High'] = boll.bollinger_hband()
         nifty['BB_Low'] = boll.bollinger_lband()
 
-        # Labels for 5-min ahead
-        nifty['Future_Close_5m'] = nifty['Close'].shift(-1)
-        nifty['Target_5m'] = (nifty['Future_Close_5m'] > nifty['Close']).astype(int)
+        # Helper to train model & predict
+        def train_and_predict(future_shift):
+            df = nifty.copy()
+            df['Future_Close'] = df['Close'].shift(-future_shift)
+            df['Target'] = (df['Future_Close'] > df['Close']).astype(int)
+            df.dropna(inplace=True)
+            features = ['RSI', 'MACD', 'Signal', 'BB_High', 'BB_Low']
+            X = df[features]
+            y = df['Target']
+            model = RandomForestClassifier(n_estimators=100, random_state=42)
+            model.fit(X, y)
+            latest_input = df.iloc[-1:][features]
+            prediction = model.predict(latest_input)[0]
+            confidence = model.predict_proba(latest_input)[0][prediction]
+            price_now = df.iloc[-1]['Close']
+            price_future = df.iloc[-1]['Future_Close']
+            return prediction, confidence, price_now, price_future
 
-        # Drop NaNs
-        nifty.dropna(inplace=True)
+        # 5-min prediction
+        pred_5m, conf_5m, price_now, price_5m = train_and_predict(1)
+        # 1-hour prediction (12 candles ahead for 5m, 30 for 2m, 4 for 15m)
+        shift_map = {'2m': 30, '5m': 12, '15m': 4}
+        future_shift_1h = shift_map.get(timeframe, 12)
+        pred_1h, conf_1h, _, price_1h = train_and_predict(future_shift_1h)
 
-        # Features and Labels
-        features = ['RSI', 'MACD', 'Signal', 'BB_High', 'BB_Low']
-        X = nifty[features]
-        y = nifty['Target_5m']
+        # Display results
+        st.subheader("🔮 Predictions")
+        up_down_5m = "📈 UP" if pred_5m == 1 else "📉 DOWN"
+        up_down_1h = "📈 UP" if pred_1h == 1 else "📉 DOWN"
+        color_5m = "green" if pred_5m == 1 else "red"
+        color_1h = "green" if pred_1h == 1 else "red"
 
-        # Train Model
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(X, y)
+        st.markdown(f"### <span style='color:{color_5m}'>Next {timeframe} Move: {up_down_5m}</span>", unsafe_allow_html=True)
+        st.markdown(f"**Confidence:** {conf_5m:.2%} | **Price Now:** ₹{price_now:.2f} | **Expected:** ₹{price_5m:.2f}")
 
-        # --- 5-Minute Prediction ---
-        latest_input = nifty.iloc[-1:][features]
-        prediction_5m = model.predict(latest_input)[0]
-        confidence_5m = model.predict_proba(latest_input)[0][prediction_5m]
+        # ₹1000 target check
+        price_diff = abs(price_5m - price_now)
+        point_target = 20  # ~₹1000 in futures (50 units × 20 pts)
+        if price_diff >= point_target:
+            st.success(f"✅ Expected move is ~{price_diff:.2f} points → Potential ₹1000+ profit")
+        else:
+            st.warning(f"⚠️ Expected move is only ~{price_diff:.2f} points → May not hit ₹1000 target")
 
-        movement_5m = "📈 UP" if prediction_5m == 1 else "📉 DOWN"
-        color_5m = "green" if prediction_5m == 1 else "red"
+        # 1-hour prediction table
+        st.subheader("🕒 One-Hour Prediction")
+        st.markdown(f"<span style='color:{color_1h}'><b>Next 1 Hour Move: {up_down_1h}</b></span>", unsafe_allow_html=True)
+        st.markdown(f"**Confidence:** {conf_1h:.2%} | **Expected Price:** ₹{price_1h:.2f}")
 
-        st.subheader("🔮 Prediction (Next 5 Minutes)")
-        st.markdown(f"### Predicted Move: <span style='color:{color_5m}'>{movement_5m}</span>", unsafe_allow_html=True)
-        st.markdown(f"**Confidence:** {confidence_5m:.2%}")
-
-        # Show timestamp in IST
-        last_time = nifty.index[-1].strftime('%Y-%m-%d %H:%M:%S %Z')
-        st.markdown(f"**Last Data Time (IST):** {last_time}")
-
-        # --- One-Hour Ahead Prediction (12 steps of 5-min) ---
-        st.subheader("🕐 One-Hour Forecast (5-min Steps)")
-
-        # Clone latest values for simulation
-        simulated = nifty.copy()
-
-        future_predictions = []
-        current_index = simulated.index[-1]
-
-        for i in range(12):
-            latest_row = simulated.iloc[-1:].copy()
-
-            # Predict and simulate next step
-            X_future = latest_row[features]
-            pred = model.predict(X_future)[0]
-            prob = model.predict_proba(X_future)[0][pred]
-
-            move = 1 if pred == 1 else -1
-            step_change = np.random.uniform(0.1, 0.3)  # Simulate % change
-
-            new_close = latest_row['Close'].values[0] * (1 + move * step_change / 100)
-            new_row = latest_row.copy()
-            new_row['Close'] = new_close
-            new_row['Open'] = new_row['High'] = new_row['Low'] = new_close
-            new_row['Volume'] = new_row['Volume'].values[0]  # keep volume same
-            new_row.index = [current_index + pd.Timedelta(minutes=5)]
-
-            # Recalculate indicators
-            new_row['RSI'] = RSIIndicator(close=pd.concat([simulated['Close'], pd.Series([new_close])]).reset_index(drop=True)).rsi().iloc[-1]
-            macd_temp = MACD(close=pd.concat([simulated['Close'], pd.Series([new_close])]).reset_index(drop=True))
-            new_row['MACD'] = macd_temp.macd().iloc[-1]
-            new_row['Signal'] = macd_temp.macd_signal().iloc[-1]
-            bb_temp = BollingerBands(close=pd.concat([simulated['Close'], pd.Series([new_close])]).reset_index(drop=True))
-            new_row['BB_High'] = bb_temp.bollinger_hband().iloc[-1]
-            new_row['BB_Low'] = bb_temp.bollinger_lband().iloc[-1]
-
-            simulated = pd.concat([simulated, new_row])
-
-            future_predictions.append({
-                "Time (IST)": new_row.index[0].strftime('%H:%M'),
-                "Predicted Move": "UP" if pred == 1 else "DOWN",
-                "Confidence": f"{prob:.2%}"
-            })
-
-        future_df = pd.DataFrame(future_predictions)
-        st.table(future_df)
+        # Timestamp
+        st.markdown(f"**Last Data Time (IST):** {nifty.index[-1].strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     except Exception as e:
         st.error(f"Error during prediction: {e}")
+
 else:
     st.warning("No data available. Please check your internet connection or try again later.")
