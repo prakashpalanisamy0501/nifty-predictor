@@ -97,6 +97,28 @@ std_dev = np.sqrt(mse)
 conf_intervals = [(p - 1.96*std_dev, p + 1.96*std_dev) for p in pred]
 conf_levels = [f"±{std_dev:.2f}" for _ in pred]
 
+# --- Calculate Accuracy Level (using MAPE) ---
+def mean_absolute_percentage_error(y_true, y_pred):
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    non_zero_idx = y_true != 0
+    y_true = y_true[non_zero_idx]
+    y_pred = y_pred[non_zero_idx]
+    if len(y_true) == 0:
+        return 100.0  # If no valid data, return max error
+    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+
+mape = mean_absolute_percentage_error(y_true.flatten(), y_pred.flatten())
+accuracy = 100 - mape
+if accuracy < 0:
+    accuracy = 0.0
+
+# --- Display Accuracy ---
+st.subheader(f"Model Accuracy Level: {accuracy:.2f}%")
+
+# --- Notification if accuracy > 90% ---
+if accuracy > 90:
+    st.success("🎉 Accuracy is above 90%! You may consider using the prediction for potential profit opportunities.")
+
 # --- Results Table ---
 future_times = pd.date_range(data.index[-1], periods=PRED_STEPS+1, freq="5min", tz=IST)[1:]
 result_df = pd.DataFrame({
