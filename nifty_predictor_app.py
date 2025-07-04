@@ -15,24 +15,43 @@ LOOKBACK = 12  # Use last 1 hour (12x5min) for prediction
 PRED_STEPS = 12  # Predict next 1 hour (12x5min)
 SHOW_LAST = 3  # Show last 3 data points
 
-# --- IST Timezone ---
 IST = pytz.timezone('Asia/Kolkata')
-
-# --- Data Loading ---
-@st.cache_data
-def load_data():
-    data = yf.download(tickers=NIFTY_TICKER, period="5d", interval=INTERVAL, progress=False)
-    data = data.dropna()
-    # Convert index to IST
-    data.index = data.index.tz_localize('UTC').tz_convert(IST)
-    return data
 
 st.title("Nifty Index 1-Hour Movement Prediction (5-min Intervals)")
 
+# --- Manual Refresh Button ---
 if st.button("Refresh Data"):
     st.cache_data.clear()
 
+# --- Data Loading with Error Handling ---
+@st.cache_data
+def load_data():
+    try:
+        data = yf.download(
+            tickers=NIFTY_TICKER,
+            period="5d",
+            interval=INTERVAL,
+            progress=False
+        )
+        data = data.dropna()
+        if data.empty:
+            return pd.DataFrame()
+        # Convert index to IST
+        if data.index.tz is None:
+            data.index = data.index.tz_localize('UTC').tz_convert(IST)
+        else:
+            data.index = data.index.tz_convert(IST)
+        return data
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return pd.DataFrame()
+
 data = load_data()
+
+# --- Validate Data ---
+if data.empty or len(data) < LOOKBACK + PRED_STEPS + 1:
+    st.error("Not enough data loaded. Please check your internet connection or ticker symbol, or try again later.")
+    st.stop()
 
 # --- Show Last 3 Data Points (Always latest, not random) ---
 st.subheader("Last 3 Data Points (5-min interval, IST)")
