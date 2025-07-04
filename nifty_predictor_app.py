@@ -9,6 +9,7 @@ from sklearn.metrics import mean_squared_error
 import pytz
 import requests
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, time
 
 # --- Pushbullet notification function ---
 def send_pushbullet_notification(title, body, api_key):
@@ -32,34 +33,47 @@ SHOW_LAST = 3
 
 IST = pytz.timezone('Asia/Kolkata')
 
-# --- Auto-refresh every 5 minutes (300,000 ms) ---
-st_autorefresh(interval=300_000, limit=None, key="auto_refresh")
+def is_market_open(now_ist):
+    market_open = time(9, 15)
+    market_close = time(15, 30)
+    return market_open <= now_ist.time() <= market_close
+
+# --- Get current IST time ---
+now_utc = datetime.utcnow()
+now_ist = now_utc.replace(tzinfo=pytz.utc).astimezone(IST)
+
+# --- Auto-refresh every 5 minutes during market hours ---
+if is_market_open(now_ist):
+    st_autorefresh(interval=300_000, limit=None, key="auto_refresh")
 
 st.title("Nifty Index 1-Hour Movement Prediction (5-min Intervals)")
 
 if st.button("Refresh Data"):
     st.cache_data.clear()
 
+# --- Show market status ---
+if is_market_open(now_ist):
+    st.info("Market is OPEN. Showing live predictions.")
+else:
+    st.info("Market is CLOSED. Showing predictions based on the last trading session.")
+
 @st.cache_data
 def load_data():
-    try:
-        data = yf.download(
-            tickers=NIFTY_TICKER,
-            period="5d",
-            interval=INTERVAL,
-            progress=False
-        )
-        data = data.dropna()
-        if data.empty:
-            return pd.DataFrame()
-        if data.index.tz is None:
-            data.index = data.index.tz_localize('UTC').tz_convert(IST)
-        else:
-            data.index = data.index.tz_convert(IST)
-        return data
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
+    # yfinance will always return latest available data, so this logic suffices
+    data = yf.download(
+        tickers=NIFTY_TICKER,
+        period="5d",
+        interval=INTERVAL,
+        progress=False
+    )
+    data = data.dropna()
+    if data.empty:
         return pd.DataFrame()
+    if data.index.tz is None:
+        data.index = data.index.tz_localize('UTC').tz_convert(IST)
+    else:
+        data.index = data.index.tz_convert(IST)
+    return data
 
 data = load_data()
 
