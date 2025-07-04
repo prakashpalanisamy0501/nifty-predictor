@@ -2,237 +2,128 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.trend import MACD, EMAIndicator, ADXIndicator
-from ta.volatility import BollingerBands, AverageTrueRange
-from ta.volume import OnBalanceVolumeIndicator
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from ta.momentum import RSIIndicator
+from ta.trend import MACD
+from ta.volatility import BollingerBands
+from sklearn.ensemble import RandomForestClassifier
 import pytz
 
-# Title with enhanced features
-st.title("🚀 NIFTY 5-Minute AI Predictor (Professional Scalping Tool)")
-st.markdown("""
-**Predicts NIFTY movement direction for upcoming 5-minute intervals with 12-step forecast**  
-*Enhanced with advanced features:*
-- XGBoost with hyperparameter tuning
-- 15+ technical indicators
-- Sequence modeling with lag features
-- True probabilistic confidence scoring
-- Model accuracy validation
-""")
+# Title
+st.title("📈 NIFTY Index Movement Predictor (AI-based, 2-Min Interval)")
+st.markdown("This model predicts whether NIFTY will go **UP or DOWN** in upcoming 2-minute intervals over the next **1 hour** using technical indicators.")
 
 # Manual Refresh Button
-if st.button("🔄 Refresh Market Data Now"):
+if st.button("🔄 Refresh Data Now"):
     st.cache_data.clear()
-    st.experimental_rerun()
 
-# Load 5-minute data with extended history
-@st.cache_data(ttl=300)  # 5-minute cache
+# Load 2-minute data
+@st.cache_data(ttl=120)
 def load_data():
     try:
-        data = yf.download("^NSEI", interval="5m", period="60d", progress=False)
+        data = yf.download("^NSEI", interval="2m", period="7d", progress=False)
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.get_level_values(0)
         data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
         data = data.dropna()
-        
-        # Convert to IST timezone
-        if data.index.tzinfo is None:
+        data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
+        data = data.dropna(subset=['Close'])
+
+        # Convert index to IST
+        if data.index.tzinfo is None or data.index.tz is None:
             data.index = data.index.tz_localize('UTC')
         data.index = data.index.tz_convert('Asia/Kolkata')
-        
+
         return data
     except Exception as e:
-        st.error(f"🚨 Data Error: {e}")
+        st.error(f"Error downloading data: {e}")
         return pd.DataFrame()
 
 # Load Data
 nifty = load_data()
 
 if not nifty.empty:
-    st.subheader("📊 Current Market Data (5-min intervals)")
-    st.dataframe(nifty.tail(3).style.format("{:.2f}"))
+    st.subheader("📊 Latest NIFTY Data (2-min)")
+    st.dataframe(nifty.tail(3))
 
     try:
-        # Feature Engineering - Advanced Indicators
-        # Momentum
+        # Feature Engineering
         nifty['RSI'] = RSIIndicator(close=nifty['Close'], window=14).rsi()
-        stoch = StochasticOscillator(high=nifty['High'], low=nifty['Low'], close=nifty['Close'], window=14, smooth_window=3)
-        nifty['Stoch_%K'] = stoch.stoch()
-        nifty['Stoch_%D'] = stoch.stoch_signal()
-        
-        # Trend
         macd = MACD(close=nifty['Close'])
         nifty['MACD'] = macd.macd()
-        nifty['MACD_Signal'] = macd.macd_signal()
-        nifty['EMA_20'] = EMAIndicator(close=nifty['Close'], window=20).ema_indicator()
-        nifty['EMA_50'] = EMAIndicator(close=nifty['Close'], window=50).ema_indicator()
-        adx = ADXIndicator(high=nifty['High'], low=nifty['Low'], close=nifty['Close'], window=14)
-        nifty['ADX'] = adx.adx()
-        
-        # Volatility
-        bb = BollingerBands(close=nifty['Close'], window=20, window_dev=2)
-        nifty['BB_Upper'] = bb.bollinger_hband()
-        nifty['BB_Lower'] = bb.bollinger_lband()
-        nifty['ATR'] = AverageTrueRange(
-            high=nifty['High'], 
-            low=nifty['Low'], 
-            close=nifty['Close'], 
-            window=14
-        ).average_true_range()
-        
-        # Volume
-        nifty['OBV'] = OnBalanceVolumeIndicator(close=nifty['Close'], volume=nifty['Volume']).on_balance_volume()
-        nifty['Volume_Change'] = nifty['Volume'].pct_change()
-        
-        # Lag Features
-        for lag in [1, 2, 3]:
-            nifty[f'Return_{lag}'] = nifty['Close'].pct_change(lag)
-            nifty[f'Volume_Change_{lag}'] = nifty['Volume_Change'].shift(lag)
-        
-        # Target Variable (Next 5-min movement)
-        nifty['Target'] = (nifty['Close'].shift(-1) > nifty['Close']).astype(int)
+        nifty['Signal'] = macd.macd_signal()
+        boll = BollingerBands(close=nifty['Close'])
+        nifty['BB_High'] = boll.bollinger_hband()
+        nifty['BB_Low'] = boll.bollinger_lband()
+
+        # Label creation for training (next candle movement)
+        future_period = 1
+        nifty['Future_Close'] = nifty['Close'].shift(-future_period)
+        nifty['Target'] = (nifty['Future_Close'] > nifty['Close']).astype(int)
         nifty.dropna(inplace=True)
-        
-        # Feature Selection
-        features = [
-            'RSI', 'Stoch_%K', 'Stoch_%D', 'MACD', 'MACD_Signal',
-            'EMA_20', 'EMA_50', 'ADX', 'BB_Upper', 'BB_Lower', 'ATR',
-            'OBV', 'Volume_Change', 'Return_1', 'Return_2', 'Return_3',
-            'Volume_Change_1', 'Volume_Change_2'
-        ]
+
+        # Prepare training data
+        features = ['RSI', 'MACD', 'Signal', 'BB_High', 'BB_Low']
         X = nifty[features]
         y = nifty['Target']
-        
-        # Train/Test Split
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, shuffle=False
-        )
-        
-        # Train XGBoost with optimized parameters
-        model = XGBClassifier(
-            n_estimators=500,
-            learning_rate=0.01,
-            max_depth=5,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            use_label_encoder=False,
-            eval_metric='logloss',
-            random_state=42
-        )
-        model.fit(X_train, y_train)
-        
-        # Validate model
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        st.success(f"✅ Model Validation Accuracy: {accuracy:.2%} (Latest 20% Data)")
-        
-        # Forecasting next 1 hour (12 steps)
-        st.subheader("🔮 Next 1 Hour Forecast (5-min Intervals)")
-        future_steps = 12
-        forecasts = []
-        current_data = nifty.copy()
-        
+
+        # Train the model
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X, y)
+
+        # Simulate next 1 hour (30 steps x 2-min)
+        st.subheader("🕒 Next 1 Hour Forecast (2-min Intervals)")
+
+        future_steps = 30
+        future_times = []
+        future_preds = []
+        future_confs = []
+
+        latest_data = nifty.copy()
+
         for step in range(future_steps):
-            # Prepare last available data point
-            current_point = current_data.iloc[[-1]][features]
-            
-            # Make prediction
-            pred_proba = model.predict_proba(current_point)[0]
-            direction = 1 if pred_proba[1] > 0.5 else 0
-            confidence = max(pred_proba)
-            
-            # Generate next candle (conservative projection)
-            last_close = current_data['Close'].iloc[-1]
-            price_multiplier = 1.0003 if direction == 1 else 0.9997
-            next_close = last_close * price_multiplier
-            
-            # Create new candle data
-            next_time = current_data.index[-1] + pd.Timedelta(minutes=5)
-            new_candle = {
-                'Open': last_close,
-                'High': last_close * 1.0005 if direction == 1 else last_close,
-                'Low': last_close if direction == 1 else last_close * 0.9995,
-                'Close': next_close,
-                'Volume': current_data['Volume'].iloc[-1] * 0.95  # conservative volume
-            }
-            
-            # Append to history
-            new_row = pd.DataFrame([new_candle], index=[next_time])
-            current_data = pd.concat([current_data, new_row])
-            
-            # Update technical indicators
-            current_data = calculate_indicators(current_data)
-            
+            # Recalculate indicators
+            latest_data['RSI'] = RSIIndicator(close=latest_data['Close'], window=14).rsi()
+            macd = MACD(close=latest_data['Close'])
+            latest_data['MACD'] = macd.macd()
+            latest_data['Signal'] = macd.macd_signal()
+            boll = BollingerBands(close=latest_data['Close'])
+            latest_data['BB_High'] = boll.bollinger_hband()
+            latest_data['BB_Low'] = boll.bollinger_lband()
+
+            input_row = latest_data[features].iloc[-1:].dropna()
+
+            if input_row.empty:
+                break
+
+            pred = model.predict(input_row)[0]
+            conf = model.predict_proba(input_row)[0][pred]
+
+            last_price = latest_data['Close'].iloc[-1]
+            next_price = last_price * (1 + (0.001 if pred == 1 else -0.001))
+
+            next_time = latest_data.index[-1] + pd.Timedelta(minutes=2)
+            next_row = latest_data.iloc[-1:].copy()
+            next_row.index = [next_time]
+            next_row['Close'] = next_price
+
             # Store forecast
-            forecasts.append({
-                "Time (IST)": next_time.strftime('%H:%M'),
-                "Direction": "📈 BULLISH" if direction == 1 else "📉 BEARISH",
-                "Confidence": f"{confidence:.1%}",
-                "Est. Price": f"{next_close:.2f}"
-            })
-        
-        # Display forecast
-        forecast_df = pd.DataFrame(forecasts)
-        st.dataframe(forecast_df.style.applymap(
-            lambda x: 'color: green' if 'BULLISH' in x else 'color: red' if 'BEARISH' in x else '',
-            subset=['Direction']
-        ))
-        
-        # Trading strategy suggestion
-        bull_count = sum(1 for f in forecasts if "BULLISH" in f['Direction'])
-        bear_count = len(forecasts) - bull_count
-        st.subheader("🎯 Trading Recommendation")
-        if bull_count > bear_count * 1.5:
-            st.success("STRONG BUY SIGNAL (Majority Bullish Forecast)")
-        elif bear_count > bull_count * 1.5:
-            st.error("STRONG SELL SIGNAL (Majority Bearish Forecast)")
-        else:
-            st.warning("NEUTRAL MARKET (Mixed Signals - Trade with Caution)")
-            
+            future_times.append(next_time.strftime('%H:%M'))
+            future_preds.append("📈 UP" if pred == 1 else "📉 DOWN")
+            future_confs.append(f"{conf:.2%}")
+
+            # Add new row to data
+            latest_data = pd.concat([latest_data, next_row])
+
+        forecast_df = pd.DataFrame({
+            "Time (IST)": future_times,
+            "Prediction": future_preds,
+            "Confidence": future_confs
+        })
+
+        st.dataframe(forecast_df, use_container_width=True)
+
     except Exception as e:
-        st.error(f"⚠️ Prediction Error: {str(e)}")
+        st.error(f"Error during model training or forecasting: {e}")
 
 else:
-    st.warning("📡 No data available. Check internet connection or try again later.")
-
-# Indicator calculation function
-def calculate_indicators(df):
-    # Momentum
-    df['RSI'] = RSIIndicator(close=df['Close'], window=14).rsi()
-    stoch = StochasticOscillator(high=df['High'], low=df['Low'], close=df['Close'], window=14, smooth_window=3)
-    df['Stoch_%K'] = stoch.stoch()
-    df['Stoch_%D'] = stoch.stoch_signal()
-    
-    # Trend
-    macd = MACD(close=df['Close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
-    df['EMA_20'] = EMAIndicator(close=df['Close'], window=20).ema_indicator()
-    df['EMA_50'] = EMAIndicator(close=df['Close'], window=50).ema_indicator()
-    adx = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=14)
-    df['ADX'] = adx.adx()
-    
-    # Volatility
-    bb = BollingerBands(close=df['Close'], window=20, window_dev=2)
-    df['BB_Upper'] = bb.bollinger_hband()
-    df['BB_Lower'] = bb.bollinger_lband()
-    df['ATR'] = AverageTrueRange(
-        high=df['High'], 
-        low=df['Low'], 
-        close=df['Close'], 
-        window=14
-    ).average_true_range()
-    
-    # Volume
-    df['OBV'] = OnBalanceVolumeIndicator(close=df['Close'], volume=df['Volume']).on_balance_volume()
-    df['Volume_Change'] = df['Volume'].pct_change()
-    
-    # Lag Features
-    for lag in [1, 2, 3]:
-        df[f'Return_{lag}'] = df['Close'].pct_change(lag)
-        df[f'Volume_Change_{lag}'] = df['Volume_Change'].shift(lag)
-    
-    return df.dropna()
+    st.warning("No data available. Please check your internet connection or try again later.")
