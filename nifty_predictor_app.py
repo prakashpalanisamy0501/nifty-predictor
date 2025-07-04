@@ -8,6 +8,7 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from sklearn.metrics import mean_squared_error
 import pytz
 import requests
+from streamlit_autorefresh import st_autorefresh
 
 # --- Pushbullet notification function ---
 def send_pushbullet_notification(title, body, api_key):
@@ -30,6 +31,9 @@ PRED_STEPS = 12
 SHOW_LAST = 3
 
 IST = pytz.timezone('Asia/Kolkata')
+
+# --- Auto-refresh every 5 minutes (300,000 ms) ---
+st_autorefresh(interval=300_000, limit=None, key="auto_refresh")
 
 st.title("Nifty Index 1-Hour Movement Prediction (5-min Intervals)")
 
