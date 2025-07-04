@@ -7,7 +7,17 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from sklearn.metrics import mean_squared_error
 import pytz
-from pushbullet import send_pushbullet_notification
+import requests
+
+# --- Pushbullet notification function ---
+def send_pushbullet_notification(title, body, api_key):
+    data_send = {"type": "note", "title": title, "body": body}
+    resp = requests.post(
+        'https://api.pushbullet.com/v2/pushes',
+        data=data_send,
+        headers={'Access-Token': api_key}
+    )
+    return resp.status_code == 200
 
 # --- Your Pushbullet API Key ---
 PUSHBULLET_API_KEY = "YOUR_PUSHBULLET_API_KEY"  # <-- Replace with your Pushbullet API key
@@ -93,7 +103,6 @@ def mean_absolute_percentage_error(y_true, y_pred):
         return 100.0
     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
-# For each step ahead, calculate MAPE over last 100 samples
 per_step_accuracy = []
 for step in range(PRED_STEPS):
     y_true_step = scaler.inverse_transform(y[-100:, step].reshape(-1, 1)).flatten()
