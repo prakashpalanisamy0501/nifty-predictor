@@ -2,128 +2,90 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator
-from ta.trend import MACD
-from ta.volatility import BollingerBands
-from sklearn.ensemble import RandomForestClassifier
-import pytz
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+import plotly.graph_objs as go
 
-# Title
-st.title("📈 NIFTY Index Movement Predictor (AI-based, 2-Min Interval)")
-st.markdown("This model predicts whether NIFTY will go **UP or DOWN** in upcoming 2-minute intervals over the next **1 hour** using technical indicators.")
+# --- Parameters ---
+NIFTY_TICKER = "^NSEI"
+INTERVAL = "5m"
+LOOKBACK = 12  # Use last 1 hour (12x5min) for prediction
+PRED_STEPS = 12  # Predict next 1 hour (12x5min)
+SHOW_LAST = 3  # Show last 3 data points
 
-# Manual Refresh Button
-if st.button("🔄 Refresh Data Now"):
-    st.cache_data.clear()
-
-# Load 2-minute data
-@st.cache_data(ttl=120)
+# --- Data Loading ---
+@st.cache_data
 def load_data():
-    try:
-        data = yf.download("^NSEI", interval="2m", period="7d", progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-        data = data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-        data = data.dropna()
-        data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
-        data = data.dropna(subset=['Close'])
+    data = yf.download(tickers=NIFTY_TICKER, period="5d", interval=INTERVAL, progress=False)
+    data = data.dropna()
+    return data
 
-        # Convert index to IST
-        if data.index.tzinfo is None or data.index.tz is None:
-            data.index = data.index.tz_localize('UTC')
-        data.index = data.index.tz_convert('Asia/Kolkata')
+data = load_data()
 
-        return data
-    except Exception as e:
-        st.error(f"Error downloading data: {e}")
-        return pd.DataFrame()
+st.title("Nifty Index 1-Hour Movement Prediction (5-min Intervals)")
 
-# Load Data
-nifty = load_data()
+# --- Show Last 3 Data Points ---
+st.subheader("Last 3 Data Points (5-min interval)")
+st.write(data.tail(SHOW_LAST)[['Open', 'High', 'Low', 'Close', 'Volume']])
 
-if not nifty.empty:
-    st.subheader("📊 Latest NIFTY Data (2-min)")
-    st.dataframe(nifty.tail(3))
+# --- Data Preprocessing ---
+scaler = MinMaxScaler()
+scaled_close = scaler.fit_transform(data[['Close']])
 
-    try:
-        # Feature Engineering
-        nifty['RSI'] = RSIIndicator(close=nifty['Close'], window=14).rsi()
-        macd = MACD(close=nifty['Close'])
-        nifty['MACD'] = macd.macd()
-        nifty['Signal'] = macd.macd_signal()
-        boll = BollingerBands(close=nifty['Close'])
-        nifty['BB_High'] = boll.bollinger_hband()
-        nifty['BB_Low'] = boll.bollinger_lband()
+X, y = [], []
+for i in range(LOOKBACK, len(scaled_close) - PRED_STEPS):
+    X.append(scaled_close[i-LOOKBACK:i, 0])
+    y.append(scaled_close[i:i+PRED_STEPS, 0])
+X, y = np.array(X), np.array(y)
+X = np.reshape(X, (X.shape[0], X.shape[1], 1))
 
-        # Label creation for training (next candle movement)
-        future_period = 1
-        nifty['Future_Close'] = nifty['Close'].shift(-future_period)
-        nifty['Target'] = (nifty['Future_Close'] > nifty['Close']).astype(int)
-        nifty.dropna(inplace=True)
+# --- Model Definition ---
+def build_model(input_shape):
+    model = Sequential()
+    model.add(LSTM(64, return_sequences=True, input_shape=input_shape))
+    model.add(Dropout(0.2))
+    model.add(LSTM(32))
+    model.add(Dropout(0.2))
+    model.add(Dense(PRED_STEPS))
+    model.compile(optimizer='adam', loss='mse')
+    return model
 
-        # Prepare training data
-        features = ['RSI', 'MACD', 'Signal', 'BB_High', 'BB_Low']
-        X = nifty[features]
-        y = nifty['Target']
+# --- Model Training (for demo, use last 1000 samples) ---
+model = build_model((LOOKBACK, 1))
+model.fit(X[-1000:], y[-1000:], epochs=10, batch_size=32, verbose=0)
 
-        # Train the model
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(X, y)
+# --- Prediction ---
+last_sequence = scaled_close[-LOOKBACK:].reshape(1, LOOKBACK, 1)
+pred_scaled = model.predict(last_sequence)
+pred = scaler.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
 
-        # Simulate next 1 hour (30 steps x 2-min)
-        st.subheader("🕒 Next 1 Hour Forecast (2-min Intervals)")
+# --- Confidence Estimation (using model's MSE on last 100 samples) ---
+from sklearn.metrics import mean_squared_error
 
-        future_steps = 30
-        future_times = []
-        future_preds = []
-        future_confs = []
+y_true = scaler.inverse_transform(y[-100:])
+y_pred = scaler.inverse_transform(model.predict(X[-100:]))
+mse = mean_squared_error(y_true.flatten(), y_pred.flatten())
+std_dev = np.sqrt(mse)
 
-        latest_data = nifty.copy()
+conf_intervals = [(p - 1.96*std_dev, p + 1.96*std_dev) for p in pred]
+conf_levels = [f"±{std_dev:.2f}" for _ in pred]
 
-        for step in range(future_steps):
-            # Recalculate indicators
-            latest_data['RSI'] = RSIIndicator(close=latest_data['Close'], window=14).rsi()
-            macd = MACD(close=latest_data['Close'])
-            latest_data['MACD'] = macd.macd()
-            latest_data['Signal'] = macd.macd_signal()
-            boll = BollingerBands(close=latest_data['Close'])
-            latest_data['BB_High'] = boll.bollinger_hband()
-            latest_data['BB_Low'] = boll.bollinger_lband()
+# --- Results Table ---
+future_times = pd.date_range(data.index[-1], periods=PRED_STEPS+1, freq="5min")[1:]
+result_df = pd.DataFrame({
+    "Time": future_times,
+    "Predicted Close": pred,
+    "Confidence Interval": [f"{low:.2f} - {high:.2f}" for low, high in conf_intervals],
+    "Confidence (Std Dev)": conf_levels
+})
 
-            input_row = latest_data[features].iloc[-1:].dropna()
+st.subheader("Next 1 Hour Prediction (5-min intervals)")
+st.table(result_df)
 
-            if input_row.empty:
-                break
-
-            pred = model.predict(input_row)[0]
-            conf = model.predict_proba(input_row)[0][pred]
-
-            last_price = latest_data['Close'].iloc[-1]
-            next_price = last_price * (1 + (0.001 if pred == 1 else -0.001))
-
-            next_time = latest_data.index[-1] + pd.Timedelta(minutes=2)
-            next_row = latest_data.iloc[-1:].copy()
-            next_row.index = [next_time]
-            next_row['Close'] = next_price
-
-            # Store forecast
-            future_times.append(next_time.strftime('%H:%M'))
-            future_preds.append("📈 UP" if pred == 1 else "📉 DOWN")
-            future_confs.append(f"{conf:.2%}")
-
-            # Add new row to data
-            latest_data = pd.concat([latest_data, next_row])
-
-        forecast_df = pd.DataFrame({
-            "Time (IST)": future_times,
-            "Prediction": future_preds,
-            "Confidence": future_confs
-        })
-
-        st.dataframe(forecast_df, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"Error during model training or forecasting: {e}")
-
-else:
-    st.warning("No data available. Please check your internet connection or try again later.")
+# --- Plot ---
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=data.index[-50:], y=data['Close'][-50:], mode='lines+markers', name='Actual'))
+fig.add_trace(go.Scatter(x=future_times, y=pred, mode='lines+markers', name='Predicted'))
+fig.update_layout(title="Nifty Index: Actual vs Predicted (Next 1 Hour)", xaxis_title="Time", yaxis_title="Nifty Close")
+st.plotly_chart(fig)
