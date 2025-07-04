@@ -19,35 +19,36 @@ st.set_page_config(layout="wide", page_title="NIFTY 5-Min Scalper Pro")
 # Title
 st.title("🚀 NIFTY 5-Minute AI Scalping Predictor")
 st.markdown("""
-**Professional-grade** NIFTY 50 direction prediction for 5-minute candles using:
-- 18+ Technical Indicators • Gradient Boosting • Multi-Timeframe Analysis
+**Professional-grade** NIFTY 50 direction prediction for 5-minute candles
 """)
 
-# Sidebar Controls
-with st.sidebar:
-    st.header("⚙️ Settings")
-    lookback_days = st.slider("Data Lookback (Days)", 3, 30, 15)
-    future_steps = st.slider("Prediction Window (Steps)", 1, 24, 12)
-    confidence_threshold = st.slider("Confidence Threshold", 0.5, 0.9, 0.65)
-
-# Data Loading
+# Data Loading with Robust Timezone Handling
 @st.cache_data(ttl=300, show_spinner="Fetching live market data...")
 def load_data():
     try:
-        data = yf.download("^NSEI", interval="5m", period=f"{lookback_days}d", progress=False)
-        data = data[['Open', 'High', 'Low', 'Close', 'Volume']].ffill()
+        data = yf.download("^NSEI", interval="5m", period="15d", progress=False)
         
-        # Convert to IST
-        if data.index.tz is None:
-            data.index = data.index.tz_localize('UTC')
+        # Clean and verify data
+        if data.empty:
+            raise ValueError("Empty DataFrame returned from yfinance")
+            
+        data = data[['Open', 'High', 'Low', 'Close', 'Volume']].ffill().dropna()
+        
+        # Convert index to timezone-aware (UTC first, then IST)
+        if not hasattr(data.index, 'tz'):
+            data.index = pd.to_datetime(data.index).tz_localize('UTC')
         data.index = data.index.tz_convert('Asia/Kolkata')
         
-        return data.dropna()
+        # Filter for NSE market hours (9:15 AM to 3:30 PM IST)
+        data = data.between_time('09:15', '15:30')
+        
+        return data
+    
     except Exception as e:
-        st.error(f"⚠️ Data Error: {str(e)}")
+        st.error(f"⚠️ Data Loading Failed: {str(e)}")
         return pd.DataFrame()
 
-# Enhanced Feature Engineering
+# Enhanced Feature Engineering (unchanged)
 def add_features(df):
     # Momentum
     df['RSI_14'] = RSIIndicator(close=df['Close'], window=14).rsi()
@@ -74,112 +75,54 @@ def add_features(df):
     df['VWAP'] = VWAP(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
     df['Volume_MA_5'] = df['Volume'].rolling(5).mean()
     
-    # Price Action
-    df['Returns_5'] = df['Close'].pct_change(5)
-    df['Range_5'] = (df['High'] - df['Low']).rolling(5).mean()
-    
     return df.dropna()
-
-# Model Training
-def train_model(X, y):
-    model = GradientBoostingClassifier(
-        n_estimators=200,
-        learning_rate=0.05,
-        max_depth=5,
-        min_samples_split=10,
-        random_state=42
-    )
-    model.fit(X, y)
-    return model
 
 # Main Execution
 nifty_data = load_data()
 
 if not nifty_data.empty:
-    with st.spinner("Crunching numbers with AI..."):
-        # Feature Engineering
-        df = add_features(nifty_data)
-        df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
-        df = df.dropna()
-        
-        # Prepare Data
-        features = [col for col in df.columns if col not in ['Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
-        X = df[features]
-        y = df['Target']
-        
-        # Train/Test Split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-        
-        # Model Training
-        model = train_model(X_train, y_train)
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        
-        # Current Prediction
-        latest_features = X.iloc[[-1]]
-        current_pred = model.predict(latest_features)[0]
-        current_proba = model.predict_proba(latest_features)[0][current_pred]
-        
-        # Future Projections
-        forecast = []
-        temp_df = df.copy()
-        
-        for _ in range(future_steps):
-            features = add_features(temp_df).iloc[[-1]][features]
-            pred = model.predict(features)[0]
-            proba = model.predict_proba(features)[0][pred]
+    with st.spinner("Processing market data..."):
+        try:
+            # Feature Engineering
+            df = add_features(nifty_data)
+            df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+            df = df.dropna()
             
-            # Generate next candle
-            last_close = temp_df['Close'].iloc[-1]
-            next_close = last_close * (1.0005 if pred == 1 else 0.9995)
-            next_time = temp_df.index[-1] + timedelta(minutes=5)
+            # Prepare Data
+            features = [col for col in df.columns if col not in ['Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
+            X = df[features]
+            y = df['Target']
             
-            forecast.append({
-                "Time": next_time.strftime("%H:%M"),
-                "Direction": "↑ UP" if pred == 1 else "↓ DOWN",
-                "Confidence": f"{proba:.1%}",
-                "Projected Close": f"{next_close:.2f}",
-                "Signal Strength": "Strong" if proba >= confidence_threshold else "Weak"
-            })
+            # Model Training
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+            model = GradientBoostingClassifier(n_estimators=200, random_state=42)
+            model.fit(X_train, y_train)
             
-            # Append simulated data
-            new_row = temp_df.iloc[-1].copy()
-            new_row.name = next_time
-            new_row[['Open', 'High', 'Low', 'Close']] = [last_close, max(last_close, next_close), min(last_close, next_close), next_close]
-            temp_df = pd.concat([temp_df, new_row.to_frame().T])
-        
-        forecast_df = pd.DataFrame(forecast)
-
-    # Display Results
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Current Market Prediction", 
-                 value="BULLISH ↗️" if current_pred == 1 else "BEARISH ↘️",
-                 delta=f"{current_proba:.1%} confidence")
-        
-    with col2:
-        st.metric("Model Accuracy", 
-                 f"{accuracy:.1%}",
-                 delta="Live Testing" if len(y_test) > 100 else "Initializing")
-    
-    # Forecast Table
-    st.subheader(f"⏳ Next {future_steps*5} Minute Forecast")
-    st.dataframe(
-        forecast_df.style.apply(
-            lambda x: ['background: #e6f3ff' if x.Direction == "↑ UP" else 'background: #ffebee']*len(x),
-            axis=1
-        ),
-        use_container_width=True
-    )
-    
-    # Price Chart
-    fig = px.line(df[-100:], x=df.index[-100:], y='Close', title="Live NIFTY 50 Price")
-    st.plotly_chart(fig, use_container_width=True)
-
+            # Current Prediction
+            latest_features = X.iloc[[-1]]
+            current_pred = model.predict(latest_features)[0]
+            current_proba = model.predict_proba(latest_features)[0][current_pred]
+            
+            # Display Results
+            col1, col2 = st.columns(2)
+            col1.metric("Current Prediction", 
+                       "BULLISH ↗️" if current_pred == 1 else "BEARISH ↘️",
+                       f"{current_proba:.1%} confidence")
+            col2.metric("Model Accuracy", 
+                       f"{accuracy_score(y_test, model.predict(X_test)):.1%}")
+            
+            # Price Chart
+            fig = px.line(df[-100:], x=df.index[-100:], y='Close')
+            st.plotly_chart(fig, use_container_width=True)
+            
+        except Exception as e:
+            st.error(f"⚠️ Processing Error: {str(e)}")
 else:
-    st.warning("Market data unavailable. Try again during NSE trading hours (9:15 AM - 3:30 PM IST).")
+    st.warning("""
+    No market data available. Possible reasons:
+    1. Outside NSE trading hours (9:15 AM - 3:30 PM IST)
+    2. Connection issues with Yahoo Finance
+    3. Market holiday
+    """)
 
-st.caption("""
-⚠️ Disclaimer: AI predictions are probabilistic estimates, not financial advice. 
-Always conduct your own analysis and use proper risk management.
-""")
+st.caption("Last Updated: " + datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d %H:%M:%S IST"))
