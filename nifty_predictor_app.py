@@ -14,41 +14,50 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # Configuration
-st.set_page_config(layout="wide", page_title="NIFTY 5-Min Scalper Pro")
+st.set_page_config(layout="wide", page_title="NIFTY AI Predictor")
 
 # Title
-st.title("🚀 NIFTY 5-Minute AI Scalping Predictor")
-st.markdown("""
-**Professional-grade** NIFTY 50 direction prediction for 5-minute candles
-""")
+st.title("🚀 NIFTY 50 5-Minute Predictor")
+st.markdown("Real-time predictions during NSE market hours (9:15 AM - 3:30 PM IST)")
 
-# Data Loading with Robust Timezone Handling
-@st.cache_data(ttl=300, show_spinner="Fetching live market data...")
+# Improved Data Loading with Retry Mechanism
+@st.cache_data(ttl=300, show_spinner="Fetching market data...")
 def load_data():
     try:
-        data = yf.download("^NSEI", interval="5m", period="15d", progress=False)
-        
-        # Clean and verify data
-        if data.empty:
-            raise ValueError("Empty DataFrame returned from yfinance")
+        # Try multiple time periods if needed
+        for days in [1, 3, 7]:
+            data = yf.download(
+                "^NSEI",
+                interval="5m",
+                period=f"{days}d",
+                progress=False,
+                timeout=10  # Faster timeout
+            )
             
-        data = data[['Open', 'High', 'Low', 'Close', 'Volume']].ffill().dropna()
+            if not data.empty:
+                # Clean data
+                data = data[['Open', 'High', 'Low', 'Close', 'Volume']]
+                data = data.dropna().ffill()
+                
+                # Convert timezone (UTC → IST)
+                data.index = pd.to_datetime(data.index)
+                if data.index.tz is None:
+                    data.index = data.index.tz_localize('UTC')
+                data.index = data.index.tz_convert('Asia/Kolkata')
+                
+                # Filter market hours
+                data = data.between_time('09:15', '15:30')
+                
+                if len(data) > 10:  # Minimum viable data
+                    return data
+                
+        raise ValueError("No valid data found after multiple attempts")
         
-        # Convert index to timezone-aware (UTC first, then IST)
-        if not hasattr(data.index, 'tz'):
-            data.index = pd.to_datetime(data.index).tz_localize('UTC')
-        data.index = data.index.tz_convert('Asia/Kolkata')
-        
-        # Filter for NSE market hours (9:15 AM to 3:30 PM IST)
-        data = data.between_time('09:15', '15:30')
-        
-        return data
-    
     except Exception as e:
-        st.error(f"⚠️ Data Loading Failed: {str(e)}")
+        st.error(f"Data loading failed: {str(e)}")
         return pd.DataFrame()
 
-# Enhanced Feature Engineering (unchanged)
+# Feature Engineering (unchanged)
 def add_features(df):
     # Momentum
     df['RSI_14'] = RSIIndicator(close=df['Close'], window=14).rsi()
@@ -73,56 +82,55 @@ def add_features(df):
     # Volume
     df['OBV'] = OnBalanceVolumeIndicator(close=df['Close'], volume=df['Volume']).on_balance_volume()
     df['VWAP'] = VWAP(high=df['High'], low=df['Low'], close=df['Close'], volume=df['Volume']).volume_weighted_average_price()
-    df['Volume_MA_5'] = df['Volume'].rolling(5).mean()
     
     return df.dropna()
 
-# Main Execution
-nifty_data = load_data()
+# Main App Logic
+def main():
+    nifty_data = load_data()
+    
+    if nifty_data.empty:
+        ist_now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        market_open = ist_now.replace(hour=9, minute=15, second=0, microsecond=0)
+        market_close = ist_now.replace(hour=15, minute=30, second=0, microsecond=0)
+        
+        st.warning(f"""
+        ## 📉 No Live Data Available
+        - Current IST Time: {ist_now.strftime('%Y-%m-%d %H:%M:%S')}
+        - Possible Reasons:
+          1. Outside market hours (9:15 AM - 3:30 PM IST)
+          2. Weekend/holiday
+          3. Yahoo Finance API issue
+        - Next market open: {market_open.strftime('%Y-%m-%d %H:%M')} (in {market_open - ist_now} hours)
+        """)
+        return
+    
+    # Process data
+    df = add_features(nifty_data)
+    df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+    df = df.dropna()
+    
+    # Train model
+    features = [col for col in df.columns if col not in ['Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
+    X_train, X_test, y_train, y_test = train_test_split(df[features], df['Target'], test_size=0.2, shuffle=False)
+    model = GradientBoostingClassifier(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
+    
+    # Display results
+    st.success(f"✅ Live data loaded ({len(df)} candles up to {df.index[-1].strftime('%H:%M IST')})")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        latest_pred = model.predict(df[features].iloc[[-1]])[0]
+        st.metric("Next 5-min Prediction", 
+                 "↑ UP" if latest_pred == 1 else "↓ DOWN",
+                 model.predict_proba(df[features].iloc[[-1]])[0][latest_pred].round(2))
+    
+    with col2:
+        st.metric("Model Accuracy", f"{accuracy_score(y_test, model.predict(X_test)):.1%}")
+    
+    # Price chart
+    st.plotly_chart(px.line(df[-100:], x=df.index[-100:], y='Close', title="NIFTY 50 Price"), use_container_width=True)
 
-if not nifty_data.empty:
-    with st.spinner("Processing market data..."):
-        try:
-            # Feature Engineering
-            df = add_features(nifty_data)
-            df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
-            df = df.dropna()
-            
-            # Prepare Data
-            features = [col for col in df.columns if col not in ['Target', 'Open', 'High', 'Low', 'Close', 'Volume']]
-            X = df[features]
-            y = df['Target']
-            
-            # Model Training
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-            model = GradientBoostingClassifier(n_estimators=200, random_state=42)
-            model.fit(X_train, y_train)
-            
-            # Current Prediction
-            latest_features = X.iloc[[-1]]
-            current_pred = model.predict(latest_features)[0]
-            current_proba = model.predict_proba(latest_features)[0][current_pred]
-            
-            # Display Results
-            col1, col2 = st.columns(2)
-            col1.metric("Current Prediction", 
-                       "BULLISH ↗️" if current_pred == 1 else "BEARISH ↘️",
-                       f"{current_proba:.1%} confidence")
-            col2.metric("Model Accuracy", 
-                       f"{accuracy_score(y_test, model.predict(X_test)):.1%}")
-            
-            # Price Chart
-            fig = px.line(df[-100:], x=df.index[-100:], y='Close')
-            st.plotly_chart(fig, use_container_width=True)
-            
-        except Exception as e:
-            st.error(f"⚠️ Processing Error: {str(e)}")
-else:
-    st.warning("""
-    No market data available. Possible reasons:
-    1. Outside NSE trading hours (9:15 AM - 3:30 PM IST)
-    2. Connection issues with Yahoo Finance
-    3. Market holiday
-    """)
-
-st.caption("Last Updated: " + datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d %H:%M:%S IST"))
+if __name__ == "__main__":
+    main()
