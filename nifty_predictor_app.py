@@ -7,23 +7,25 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from sklearn.metrics import mean_squared_error
 import pytz
+from pushbullet import send_pushbullet_notification
+
+# --- Your Pushbullet API Key ---
+PUSHBULLET_API_KEY = "YOUR_PUSHBULLET_API_KEY"  # <-- Replace with your Pushbullet API key
 
 # --- Parameters ---
 NIFTY_TICKER = "^NSEI"
 INTERVAL = "5m"
-LOOKBACK = 12  # Use last 1 hour (12x5min) for prediction
-PRED_STEPS = 12  # Predict next 1 hour (12x5min)
-SHOW_LAST = 3  # Show last 3 data points
+LOOKBACK = 12
+PRED_STEPS = 12
+SHOW_LAST = 3
 
 IST = pytz.timezone('Asia/Kolkata')
 
 st.title("Nifty Index 1-Hour Movement Prediction (5-min Intervals)")
 
-# --- Manual Refresh Button ---
 if st.button("Refresh Data"):
     st.cache_data.clear()
 
-# --- Data Loading with Error Handling ---
 @st.cache_data
 def load_data():
     try:
@@ -36,7 +38,6 @@ def load_data():
         data = data.dropna()
         if data.empty:
             return pd.DataFrame()
-        # Convert index to IST
         if data.index.tz is None:
             data.index = data.index.tz_localize('UTC').tz_convert(IST)
         else:
@@ -48,16 +49,13 @@ def load_data():
 
 data = load_data()
 
-# --- Validate Data ---
 if data.empty or len(data) < LOOKBACK + PRED_STEPS + 1:
     st.error("Not enough data loaded. Please check your internet connection or ticker symbol, or try again later.")
     st.stop()
 
-# --- Show Last 3 Data Points (Always latest, not random) ---
 st.subheader("Last 3 Data Points (5-min interval, IST)")
 st.write(data.tail(SHOW_LAST)[['Open', 'High', 'Low', 'Close', 'Volume']])
 
-# --- Data Preprocessing ---
 scaler = MinMaxScaler()
 scaled_close = scaler.fit_transform(data[['Close']])
 
@@ -68,7 +66,6 @@ for i in range(LOOKBACK, len(scaled_close) - PRED_STEPS):
 X, y = np.array(X), np.array(y)
 X = np.reshape(X, (X.shape[0], X.shape[1], 1))
 
-# --- Model Definition ---
 def build_model(input_shape):
     model = Sequential()
     model.add(LSTM(64, return_sequences=True, input_shape=input_shape))
@@ -79,54 +76,62 @@ def build_model(input_shape):
     model.compile(optimizer='adam', loss='mse')
     return model
 
-# --- Model Training (for demo, use last 1000 samples) ---
 model = build_model((LOOKBACK, 1))
 model.fit(X[-1000:], y[-1000:], epochs=10, batch_size=32, verbose=0)
 
-# --- Prediction ---
 last_sequence = scaled_close[-LOOKBACK:].reshape(1, LOOKBACK, 1)
 pred_scaled = model.predict(last_sequence)
 pred = scaler.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
 
-# --- Confidence Estimation (using model's MSE on last 100 samples) ---
-y_true = scaler.inverse_transform(y[-100:])
-y_pred = scaler.inverse_transform(model.predict(X[-100:]))
-mse = mean_squared_error(y_true.flatten(), y_pred.flatten())
-std_dev = np.sqrt(mse)
-
-conf_intervals = [(p - 1.96*std_dev, p + 1.96*std_dev) for p in pred]
-conf_levels = [f"±{std_dev:.2f}" for _ in pred]
-
-# --- Calculate Accuracy Level (using MAPE) ---
+# --- Per-step accuracy calculation ---
 def mean_absolute_percentage_error(y_true, y_pred):
     y_true, y_pred = np.array(y_true), np.array(y_pred)
     non_zero_idx = y_true != 0
     y_true = y_true[non_zero_idx]
     y_pred = y_pred[non_zero_idx]
     if len(y_true) == 0:
-        return 100.0  # If no valid data, return max error
+        return 100.0
     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
-mape = mean_absolute_percentage_error(y_true.flatten(), y_pred.flatten())
-accuracy = 100 - mape
-if accuracy < 0:
-    accuracy = 0.0
+# For each step ahead, calculate MAPE over last 100 samples
+per_step_accuracy = []
+for step in range(PRED_STEPS):
+    y_true_step = scaler.inverse_transform(y[-100:, step].reshape(-1, 1)).flatten()
+    y_pred_step = scaler.inverse_transform(model.predict(X[-100:])[:, step].reshape(-1, 1)).flatten()
+    mape = mean_absolute_percentage_error(y_true_step, y_pred_step)
+    accuracy = max(0.0, 100 - mape)
+    per_step_accuracy.append(accuracy)
 
-# --- Display Accuracy ---
-st.subheader(f"Model Accuracy Level: {accuracy:.2f}%")
+# --- Confidence Estimation ---
+y_true_all = scaler.inverse_transform(y[-100:])
+y_pred_all = scaler.inverse_transform(model.predict(X[-100:]))
+mse = mean_squared_error(y_true_all.flatten(), y_pred_all.flatten())
+std_dev = np.sqrt(mse)
+conf_intervals = [(p - 1.96*std_dev, p + 1.96*std_dev) for p in pred]
+conf_levels = [f"±{std_dev:.2f}" for _ in pred]
 
-# --- Notification if accuracy > 90% ---
-if accuracy > 90:
-    st.success("🎉 Accuracy is above 90%! You may consider using the prediction for potential profit opportunities.")
-
-# --- Results Table ---
 future_times = pd.date_range(data.index[-1], periods=PRED_STEPS+1, freq="5min", tz=IST)[1:]
 result_df = pd.DataFrame({
     "Time (IST)": future_times,
     "Predicted Close": pred,
+    "Accuracy (%)": [f"{acc:.2f}" for acc in per_step_accuracy],
     "Confidence Interval": [f"{low:.2f} - {high:.2f}" for low, high in conf_intervals],
     "Confidence (Std Dev)": conf_levels
 })
 
 st.subheader("Next 1 Hour Prediction (5-min intervals, IST)")
 st.table(result_df)
+
+# --- Notification to phone if any interval accuracy > 90% ---
+notify_rows = result_df[result_df["Accuracy (%)"].astype(float) > 90]
+if not notify_rows.empty:
+    st.success("🎉 One or more intervals have accuracy above 90%! Notification sent to your phone.")
+    # Send notification (only once per refresh)
+    message = "High Accuracy Prediction Intervals:\n"
+    for idx, row in notify_rows.iterrows():
+        message += f"{row['Time (IST)'].strftime('%H:%M')} - Accuracy: {row['Accuracy (%)']}%\n"
+    send_pushbullet_notification(
+        title="Nifty High Accuracy Alert",
+        body=message,
+        api_key=PUSHBULLET_API_KEY
+    )
