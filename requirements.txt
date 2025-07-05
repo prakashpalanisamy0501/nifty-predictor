@@ -4,7 +4,6 @@ pandas
 numpy
 scikit-learn
 tensorflow
-keras
 pytz
 requests
 streamlit-autorefresh
