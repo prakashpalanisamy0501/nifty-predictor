@@ -135,15 +135,13 @@ y_pred_all = scaler.inverse_transform(model.predict(X[-100:]))
 mse = mean_squared_error(y_true_all.flatten(), y_pred_all.flatten())
 std_dev = np.sqrt(mse)
 conf_intervals = [(p - 1.96*std_dev, p + 1.96*std_dev) for p in pred]
-conf_levels = [f"±{std_dev:.2f}" for _ in pred]
 
 future_times = pd.date_range(data.index[-1], periods=PRED_STEPS+1, freq="5min", tz=IST)[1:]
 result_df = pd.DataFrame({
     "Time (IST)": future_times,
-    "Predicted Close": pred,
+    "Predicted Close": [int(round(p)) for p in pred],  # No decimal points
     "Accuracy (%)": [f"{acc:.2f}" for acc in per_step_accuracy],
-    "Confidence Interval": [f"{low:.2f} - {high:.2f}" for low, high in conf_intervals],
-    "Confidence (Std Dev)": conf_levels
+    "Confidence Interval": [f"{low:.2f} - {high:.2f}" for low, high in conf_intervals]
 })
 
 st.subheader("Next 1 Hour Prediction (5-min intervals, IST)")
